@@ -144,7 +144,9 @@ class POSApp:
         # إضافة زر حذف لكل عنصر
         self.cart_list.bind('<Double-Button-1>', self.delete_selected_item)
 
-        self.total_label = tk.Label(self.cart_frame, text="الإجمالي: 0.00 ريال", font=("Segoe UI", 14), bg="black",
+        reshape_total = arabic_reshaper.reshape("الإجمالي: 0.00 ريال")
+        bidi_total = bidi.algorithm.get_display(reshape_total)
+        self.total_label = tk.Label(self.cart_frame, text=bidi_total, font=("Segoe UI", 14), bg="black",
                                     fg="white")
         self.total_label.pack(pady=10)
 
@@ -211,10 +213,12 @@ class POSApp:
 
     def handle_message_ok(self):
         msg = self.message_label.cget("text")
-        if "السلة فارغة" in msg or "تم تفريغ السلة" in msg:
-            self.show_frame(self.cart_frame)
-        else:
-            self.return_to_camera()
+
+    
+
+        #if "السلة فارغة" in msg or "تم تفريغ السلة" in msg: for deside where to go after alart
+        self.show_frame(self.cart_frame)
+        
 
     def show_frame(self, frame):
         def _show_frame():
@@ -228,7 +232,12 @@ class POSApp:
 
     def show_message(self, msg):
         def _show_message():
-            self.message_label.config(text=msg)
+
+            reshape_msg = arabic_reshaper.reshape(msg)
+            bidi_msg= bidi.algorithm.get_display(reshape_msg)
+
+            self.message_label.config(text=bidi_msg)
+
             self.show_frame(self.message_frame)
 
         self.queue.put(_show_message)
@@ -325,7 +334,7 @@ class POSApp:
         self.camera_frame.place(relx=0.5, rely=0.5, anchor="center")
 
         product_label = tk.Label(self.camera_frame,
-                                 text=f"{product['name']}\nالسعر: {product['price']} ريال",
+                                 text=f"{product['name']}\nPrice: {product['price']} SAR",
                                  font=("Segoe UI", 18),
                                  bg="black",
                                  fg="white")
@@ -347,7 +356,7 @@ class POSApp:
     def add_to_cart(self, product):
         self.cart.append(product)
         self.update_cart_display()
-        self.show_message(f"تمت إضافة {product['name']} إلى السلة")
+        self.show_message(f"Added {product['name']} To the cart")
 
     def return_to_camera(self):
         for widget in self.camera_frame.winfo_children():
@@ -360,9 +369,9 @@ class POSApp:
         self.cart_list.delete(0, tk.END)
         total = 0
         for item in self.cart:
-            self.cart_list.insert(tk.END, f"{item['name']} - {item['price']} ريال")
+            self.cart_list.insert(tk.END, f"{item['name']} - {item['price']} SAR")
             total += item['price']
-        self.total_label.config(text=f"الإجمالي: {total:.2f} ريال")
+        self.total_label.config(text=f"Total: {total:.2f} SAR")
 
     def delete_selected_item(self, event):
         selection = self.cart_list.curselection()
@@ -384,13 +393,13 @@ class POSApp:
                 self.update_cart_display()
                 self.manual_entry.delete(0, tk.END)
                 # إظهار رسالة مؤقتة بدلاً من الانتقال لصفحة الرسائل
-                self.show_temp_message(f"تمت إضافة {product['name']} إلى السلة")
+                self.show_temp_message(f"Added {product['name']} To the cart")
             else:
                 self.manual_entry.delete(0, tk.END)
                 self.show_frame(self.manual_error_frame)
         except ValueError:
             self.manual_entry.delete(0, tk.END)
-            self.show_temp_message("الباركود المدخل غير صالح")
+            self.show_temp_message("Wrong Parcode!!")
 
     def show_temp_message(self, msg):
         # حفظ النص الأصلي إذا كان هناك رسالة سابقة
