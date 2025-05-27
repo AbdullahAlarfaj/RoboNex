@@ -17,9 +17,9 @@ import os
 
 
 # ========== إعدادات الذكاء الاصطناعي والصوت (API) ==========
-client1 = OpenAI(api_key=)
-speech_key = ""
-client = ElevenLabs(api_key='')
+client1 = OpenAI(api_key="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")
+speech_key = "27owsN70H5KeopQ3cQlyW6GOQJTFLepdyX4TOD9Pvg7xuQz2zFqPJQQJ99BDACFcvJRXJ3w3AAAYACOGqEUa"
+client = ElevenLabs(api_key='sk_27f6bd5e157f6e01351ab8018a22957089cd49bc6f2a7e6f')
 service_region = "qatarcentral"
 
 # ========== توجيهات الرد للروبوت من شات جي بي تي ==========
@@ -50,7 +50,7 @@ randnormal = 0
 seqsounds = 1
 # ========== كلاس تحريك تعابير وجه الروبوت ==========
 class AnimatedRobot:
-    def __init__(self, master, serial_port='COM3', baudrate=9600):
+    def __init__(self, master, serial_port='/dev/ttyUSB0', baudrate=9600):
         self.serial_lock = threading.Lock()
         self.master = master
         self.serial_port = serial_port
