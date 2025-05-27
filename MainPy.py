@@ -1,5 +1,7 @@
 import tkinter as tk
+from pynput import keyboard, mouse  # استيراد مكتبة الماوس من pynput
 from pynput.keyboard import Key, Listener
+from pynput.mouse import Button, Controller as MouseController
 import threading
 import time
 import serial
@@ -7,6 +9,7 @@ from Robot import AnimatedRobot, Controller, expression_loop
 from Cart import POSApp
 import os
 os.environ['SDL_AUDIODRIVER'] = 'dsp'  # or 'dsp'
+
 
 class MainController:
     def __init__(self):
@@ -20,7 +23,7 @@ class MainController:
 
         # تهيئة البرامج
         try:
-            self.robot = AnimatedRobot(self.robot_window, serial_port='COM3', baudrate=9600)
+            self.robot = AnimatedRobot(self.robot_window, serial_port='/dev/ttyUSB0', baudrate=9600)
             self.controller = Controller(self.robot)
         except Exception as e:
             print(f"Failed to initialize robot: {e}")
@@ -36,13 +39,13 @@ class MainController:
         # إعدادات التحكم
         self.current_program = "robot"
         self.setup_programs()
-        self.setup_keyboard()
+        self.setup_input_listeners()  # تغيير اسم الدالة لتعكس الوظيفة الجديدة
 
         # بدء التشغيل
         self.running = True
         self.keyboard_thread = threading.Thread(target=self.keyboard_listener, daemon=True)
         self.keyboard_thread.start()
-
+        
         self.update_windows_visibility()
         self.root.protocol("WM_DELETE_WINDOW", self.safe_exit)
         self.root.mainloop()
@@ -54,30 +57,39 @@ class MainController:
             window.geometry(f"{window.winfo_screenwidth()}x{window.winfo_screenheight()}+0+0")
             window.attributes('-topmost', True)
 
-    def setup_keyboard(self):
-        # Start a non-blocking keyboard listener
-        self.listener = Listener(
+    def setup_input_listeners(self):
+        # بدء الاستماع لأحداث لوحة المفاتيح
+        self.keyboard_listener = Listener(
             on_press=self.on_key_press,
             on_release=self.on_key_release
         )
-        self.listener.start()
+        self.keyboard_listener.start()
+        
+        # بدء الاستماع لأحداث الماوس
+        self.mouse_listener = mouse.Listener(
+            on_click=self.on_mouse_click
+        )
+        self.mouse_listener.start()
 
     def on_key_press(self, key):
         try:
-            if key == Key.space:
-                self.handle_space()
-            elif key == Key.ctrl_l or key == Key.ctrl_r:
+            if key == Key.ctrl_l or key == Key.ctrl_r:
                 self.switch_programs()
             elif key.char == 'q':
                 self.safe_exit()
         except AttributeError:
-            pass  # Ignore special keys
+            pass  # تجاهل الأزرار الخاصة
 
     def on_key_release(self, key):
-        pass  # Optional: add logic if needed
+        pass  # إضافة منطق هنا إذا لزم الأمر
 
-    def handle_space(self):
-        """معالجة ضغط مفتاح المسافة"""
+    def on_mouse_click(self, x, y, button, pressed):
+        """معالجة نقرات الماوس"""
+        if button == Button.left and pressed:  # فقط عند النقر وليس عند الإفلات
+            self.handle_click()
+
+    def handle_click(self):
+        """معالجة النقر/اللمس"""
         if self.current_program == "robot" and hasattr(self, 'controller'):
             self.controller.toggle()
 
@@ -105,8 +117,10 @@ class MainController:
 
     def safe_exit(self):
         self.running = False
-        if hasattr(self, 'listener'):
-            self.listener.stop()  # Stop pynput listener
+        if hasattr(self, 'keyboard_listener'):
+            self.keyboard_listener.stop()  # إيقاف مستمع لوحة المفاتيح
+        if hasattr(self, 'mouse_listener'):
+            self.mouse_listener.stop()  # إيقاف مستمع الماوس
         self.root.quit()
         self.root.destroy()
 
