@@ -1,5 +1,5 @@
 import tkinter as tk
-from pynput import keyboard, mouse  # استيراد مكتبة الماوس من pynput
+from pynput import keyboard, mouse
 from pynput.keyboard import Key, Listener
 from pynput.mouse import Button, Controller as MouseController
 import threading
@@ -7,16 +7,20 @@ import time
 import serial
 from Robot import AnimatedRobot, Controller, expression_loop
 from Cart import POSApp
-import os
-os.environ['SDL_AUDIODRIVER'] = 'dsp'  # or 'dsp'
-
+import RPi.GPIO as GPIO
 
 class MainController:
     def __init__(self):
-        self.current_program = "robot"  # أو "pos" حسب البداية
+        self.current_program = "robot"
         self.root = tk.Tk()
         self.root.withdraw()
 
+        # Initialize GPIO for touch sensor
+        GPIO.setmode(GPIO.BCM)
+        self.TOUCH_PIN = 12
+        GPIO.setup(self.TOUCH_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP)
+        self.prev_touch_state = GPIO.HIGH
+        
         # إعدادات النوافذ
         self.robot_window = tk.Toplevel(self.root)
         self.pos_window = tk.Toplevel(self.root)
@@ -39,16 +43,36 @@ class MainController:
         # إعدادات التحكم
         self.current_program = "robot"
         self.setup_programs()
-        self.setup_input_listeners()  # تغيير اسم الدالة لتعكس الوظيفة الجديدة
+        self.setup_input_listeners()
 
         # بدء التشغيل
         self.running = True
         self.keyboard_thread = threading.Thread(target=self.keyboard_listener, daemon=True)
         self.keyboard_thread.start()
         
+        # Start touch sensor monitoring thread
+        self.touch_thread = threading.Thread(target=self.monitor_touch_sensor, daemon=True)
+        self.touch_thread.start()
+        
         self.update_windows_visibility()
         self.root.protocol("WM_DELETE_WINDOW", self.safe_exit)
         self.root.mainloop()
+
+    def monitor_touch_sensor(self):
+        """Monitor the touch sensor in a separate thread"""
+        while self.running:
+            touch_state = GPIO.input(self.TOUCH_PIN)
+            
+            if touch_state != self.prev_touch_state:
+                if touch_state == GPIO.LOW:  # Touch detected
+                    self.handle_touch()
+                self.prev_touch_state = touch_state
+            
+            time.sleep(0.1)
+
+    def handle_touch(self):
+        """Handle touch sensor input"""
+        self.switch_programs() #change program
 
     def setup_programs(self):
         """تهيئة إعدادات النوافذ"""
@@ -75,6 +99,9 @@ class MainController:
         try:
             if key == Key.ctrl_l or key == Key.ctrl_r:
                 self.switch_programs()
+            elif key == Key.space: 
+                if self.current_program == "robot" and hasattr(self, 'controller'):
+                    self.controller.toggle()
             elif key.char == 'q':
                 self.safe_exit()
         except AttributeError:
@@ -85,7 +112,7 @@ class MainController:
 
     def on_mouse_click(self, x, y, button, pressed):
         """معالجة نقرات الماوس"""
-        if button == Button.left and pressed:  # فقط عند النقر وليس عند الإفلات
+        if button == Button.left and pressed:
             self.handle_click()
 
     def handle_click(self):
@@ -118,9 +145,10 @@ class MainController:
     def safe_exit(self):
         self.running = False
         if hasattr(self, 'keyboard_listener'):
-            self.keyboard_listener.stop()  # إيقاف مستمع لوحة المفاتيح
+            self.keyboard_listener.stop()
         if hasattr(self, 'mouse_listener'):
-            self.mouse_listener.stop()  # إيقاف مستمع الماوس
+            self.mouse_listener.stop()
+        GPIO.cleanup()  # Clean up GPIO resources
         self.root.quit()
         self.root.destroy()
 
