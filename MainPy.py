@@ -9,6 +9,7 @@ from Robot import AnimatedRobot, Controller, expression_loop
 from Cart import POSApp
 import RPi.GPIO as GPIO
 
+
 class MainController:
     def __init__(self):
         self.current_program = "robot"
@@ -20,7 +21,7 @@ class MainController:
         self.TOUCH_PIN = 12
         GPIO.setup(self.TOUCH_PIN, GPIO.IN, pull_up_down=GPIO.PUD_UP)
         self.prev_touch_state = GPIO.HIGH
-        
+
         # إعدادات النوافذ
         self.robot_window = tk.Toplevel(self.root)
         self.pos_window = tk.Toplevel(self.root)
@@ -49,11 +50,11 @@ class MainController:
         self.running = True
         self.keyboard_thread = threading.Thread(target=self.keyboard_listener, daemon=True)
         self.keyboard_thread.start()
-        
+
         # Start touch sensor monitoring thread
         self.touch_thread = threading.Thread(target=self.monitor_touch_sensor, daemon=True)
         self.touch_thread.start()
-        
+
         self.update_windows_visibility()
         self.root.protocol("WM_DELETE_WINDOW", self.safe_exit)
         self.root.mainloop()
@@ -62,17 +63,17 @@ class MainController:
         """Monitor the touch sensor in a separate thread"""
         while self.running:
             touch_state = GPIO.input(self.TOUCH_PIN)
-            
+
             if touch_state != self.prev_touch_state:
                 if touch_state == GPIO.LOW:  # Touch detected
                     self.handle_touch()
                 self.prev_touch_state = touch_state
-            
+
             time.sleep(0.1)
 
     def handle_touch(self):
         """Handle touch sensor input"""
-        self.switch_programs() #change program
+        self.switch_programs()  # change program
 
     def setup_programs(self):
         """تهيئة إعدادات النوافذ"""
@@ -83,23 +84,19 @@ class MainController:
 
     def setup_input_listeners(self):
         # بدء الاستماع لأحداث لوحة المفاتيح
-        self.keyboard_listener = Listener(
-            on_press=self.on_key_press,
-            on_release=self.on_key_release
-        )
+        self.keyboard_listener = Listener(on_press=self.on_key_press, on_release=self.on_key_release)
         self.keyboard_listener.start()
-        
+
+
         # بدء الاستماع لأحداث الماوس
-        self.mouse_listener = mouse.Listener(
-            on_click=self.on_mouse_click
-        )
+        self.mouse_listener = mouse.Listener(on_click=self.on_mouse_click)
         self.mouse_listener.start()
 
     def on_key_press(self, key):
         try:
             if key == Key.ctrl_l or key == Key.ctrl_r:
                 self.switch_programs()
-            elif key == Key.space: 
+            elif key == Key.space:
                 if self.current_program == "robot" and hasattr(self, 'controller'):
                     self.controller.toggle()
             elif key.char == 'q':
@@ -137,21 +134,15 @@ class MainController:
             self.robot_window.withdraw()
             self.pos_window.deiconify()
 
-    def keyboard_listener(self):
-        """مراقبة لوحة المفاتيح"""
-        while self.running:
-            time.sleep(0.1)
-
     def safe_exit(self):
         self.running = False
         if hasattr(self, 'keyboard_listener'):
-            self.keyboard_listener.stop()
+            self.keyboard_listener.stop()  # استخدم stop() وليس استدعاء الكائن
         if hasattr(self, 'mouse_listener'):
             self.mouse_listener.stop()
         GPIO.cleanup()  # Clean up GPIO resources
         self.root.quit()
         self.root.destroy()
-
 
 if __name__ == "__main__":
     try:
