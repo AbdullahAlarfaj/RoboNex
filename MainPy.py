@@ -48,8 +48,7 @@ class MainController:
 
         # بدء التشغيل
         self.running = True
-        self.keyboard_thread = threading.Thread(target=self.keyboard_listener, daemon=True)
-        self.keyboard_thread.start()
+        self.setup_input_listeners()
 
         # Start touch sensor monitoring thread
         self.touch_thread = threading.Thread(target=self.monitor_touch_sensor, daemon=True)
@@ -91,7 +90,8 @@ class MainController:
         # بدء الاستماع لأحداث الماوس
         self.mouse_listener = mouse.Listener(on_click=self.on_mouse_click)
         self.mouse_listener.start()
-
+    
+    
     def on_key_press(self, key):
         try:
             if key == Key.ctrl_l or key == Key.ctrl_r:
@@ -140,9 +140,10 @@ class MainController:
             self.keyboard_listener.stop()  # استخدم stop() وليس استدعاء الكائن
         if hasattr(self, 'mouse_listener'):
             self.mouse_listener.stop()
-        GPIO.cleanup()  # Clean up GPIO resources
+        GPIO.cleanup()  # Clean up GPIO resources\
         self.root.quit()
         self.root.destroy()
+   
 
 if __name__ == "__main__":
     try:
