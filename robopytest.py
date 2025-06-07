@@ -88,7 +88,15 @@ class AnimatedRobot:
         self.canvas.pack()
 
     # ========== تحميل التعبيرات لوجه الروبوت وتجهيزها للاستعمال ==========
+    
     def load_expressions(self):
+        # قبل تحميل تعبيرات جديدة، تنظيف القديمة إن وجدت
+        if hasattr(self, 'expressions'):
+            for expr in self.expressions.values():
+                if 'frames' in expr:
+                    for frame in expr['frames']:
+                        frame.__del__()
+        self.expressions = {}
         self.expressions_dir = Path("robot_expressions")
         self.expressions = {}
         expressions_list = [
@@ -246,7 +254,7 @@ def recognize_from_microphone(robot, stop_event):
         parsed = emotion_split(response)  # ارسال رد جي بي تي الى تحليل المشاعر لفصل المشاعر والرد
         print("المشاعر:", parsed["emotion"])
         print("النص:", parsed["text"])
-        speakwithelevenlabs(parsed["text"], parsed["emotion"], robot)  # ارسال الكلام الى الفن لابس لتحويله الى صوت
+        speakwithelevenlabs(parsed["text"], parsed["emotion"], robot, stop_event)  # ارسال الكلام الى الفن لابس لتحويله الى صوت
     else:
         print("nothing to record")
         robot.set_expression("neutral")
@@ -269,14 +277,20 @@ class Controller:
                 stop_ad_sound()
                 self.listening = True
                 if hasattr(self, 'stop_event'):
-                    self.stop_event.clear()  # إعادة استخدام الـ Event القديم
+                    self.stop_event.clear()
                 else:
                     self.stop_event = threading.Event()
-                threading.Thread(
+            
+                # إيقاف أي ثريد قديم إن وجد
+                if hasattr(self, 'listening_thread'):
+                    self.listening_thread.join(timeout=0.1)
+                
+                self.listening_thread = threading.Thread(
                     target=self.listen_loop,
                     args=(self.stop_event,),
                     daemon=True
-                ).start()
+                )
+                self.listening_thread.start()
             else:
                 print("إيقاف مؤقت")
                 self.listening = False
@@ -359,7 +373,8 @@ if __name__ == "__main__":
     controller = Controller(robot)
 
     # Start expression loop in a thread
-    threading.Thread(target=expression_loop, args=(None, robot, controller), daemon=True).start()
+    stop_event = threading.Event()
+    threading.Thread(target=expression_loop, args=(None, robot, controller, stop_event), daemon=True).start()
 
 
     # Start pynput keyboard listener
