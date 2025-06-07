@@ -37,7 +37,9 @@ class MainController:
 
         # تشغيل تعبيرات وحركات وانتظار عشوائية إذا تم التهيئة بنجاح
         if self.controller and self.robot:
-            threading.Thread(target=lambda: expression_loop(self, self.robot, self.controller), daemon=True).start()
+            self.stop_event = threading.Event()
+            threading.Thread(target=expression_loop, args=(self, self.robot, self.controller, self.stop_event), daemon=True).start()
+        
 
         self.pos_app = POSApp(self.pos_window)
 
