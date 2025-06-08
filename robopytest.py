@@ -14,6 +14,10 @@ import pygame
 from openai import OpenAI
 import os
 
+# ========== تركيز تشغيل البرنامج على اعلى كفائة ==========
+import resource
+resource.setrlimit(resource.RLIMIT_NOFILE, (2048, 2048)
+
 # ========== إعدادات الذكاء الاصطناعي والصوت (API) ==========
 client1 = OpenAI(
     api_key="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")
@@ -229,38 +233,70 @@ def speakwithelevenlabs(answer, emotion, robot, stop_event):
 
 # ========== تحويل الصوت الى نص وارسال الاوامر لشات جي بي تي بعد تلقي الرد ==========
 def recognize_from_microphone(robot, stop_event):
+    # تهيئة إعدادات التعرف الصوتي من Azure
     speech_config = speechsdk.SpeechConfig(subscription=speech_key, region=service_region)
+    # تحديد لغة التعرف (العربية السعودية)
     speech_config.speech_recognition_language = "ar-SA"
-    audio_config = speechsdk.audio.AudioConfig(use_default_microphone=True)
-    recognizer = speechsdk.SpeechRecognizer(speech_config=speech_config, audio_config=audio_config)
 
-    print("استمع... (اضغط Space لإيقاف)")
-    robot.set_expression("listening")  # للتفكير بعد الاستماع مباشرة
+    # تهيئة إعدادات الميكروفون
+    audio_config = speechsdk.audio.AudioConfig(
+        use_default_microphone=True,  # استخدام الميكروفون الافتراضي
+    )
+
+    # إنشاء كائن التعرف الصوتي
+    recognizer = speechsdk.SpeechRecognizer(speech_config=speech_config, audio_config=audio_config)
+    # متغير لتخزين نتيجة التعرف
+    recognition_result = None
+
+    # دالة رد نداء عند التعرف على الكلام
+    def recognized_cb(evt):
+        nonlocal recognition_result  # للوصول إلى المتغير الخارجي
+        if evt.result.reason == speechsdk.ResultReason.RecognizedSpeech:  # إذا تم التعرف على كلام
+            recognition_result = evt.result  # حفظ النتيجة
+
+    # ربط دالة الرد بالحدث
+    recognizer.recognized.connect(recognized_cb)
+    # تغيير تعبير وجه الروبوت إلى "يستمع"
+    robot.set_expression("listening")
 
     try:
-        result = recognizer.recognize_once_async().get()
+        # بدء عملية التعرف المستمر
+        recognizer.start_continuous_recognition()
+        # حفظ وقت البدء لتحديد المدة القصوى
+        start_time = time.time()
+
+        # حلقة انتظار حتى يتم التعرف على الكلام أو الضغط على إيقاف
+        while not stop_event.is_set() and recognition_result is None:
+            if time.time() - start_time > 10:  # إذا تجاوزت المدة 10 ثواني
+                break  # إنهاء الانتظار
+            time.sleep(0.05)  # انتظار قصير لتقليل الحمل على المعالج
+
+        # إيقاف التعرف بعد الخروج من الحلقة
+        recognizer.stop_continuous_recognition()
+
+        # إذا تم الضغط على إيقاف
+        if stop_event.is_set():
+            robot.set_expression("neutral")  # إعادة الوجه لوضعه الطبيعي
+            return None  # إنهاء الدالة
+
+        # إذا كانت هناك نتيجة تعرف
+        if recognition_result:
+            robot.set_expression("thinking")  # تغيير التعابير إلى "يفكر"
+            # إرسال النص إلى ChatGPT
+            response = chat_with_gpt(recognition_result.text)
+            # تحليل الرد لفصل المشاعر عن النص
+            parsed = emotion_split(response)
+            # تحويل النص إلى صوت مع تعابير الوجه المناسبة
+            speakwithelevenlabs(parsed["text"], parsed["emotion"], robot, stop_event)
+
     except Exception as e:
-        print(f"⚠️ فشل التعرف على الصوت: {e}")
+        # في حالة حدوث خطأ، طباعة الرسالة
+        print(f"⚠️ خطأ: {e}")
+    finally:
+        # في النهاية، ضمان إعادة الروبوت للوضع الطبيعي
         robot.set_expression("neutral")
-        return None
-
-    if stop_event.is_set():  # التحقق من طلب الإيقاف
-        return None
-
-    if result.reason == speechsdk.ResultReason.RecognizedSpeech:
-        robot.set_expression("thinking")  # للتفكير بعد الاستماع مباشرة
-        print("النص:", result.text)
-        response = chat_with_gpt(result.text)  # ارسال السؤال لشات جي بي تي
-        parsed = emotion_split(response)  # ارسال رد جي بي تي الى تحليل المشاعر لفصل المشاعر والرد
-        print("المشاعر:", parsed["emotion"])
-        print("النص:", parsed["text"])
-        speakwithelevenlabs(parsed["text"], parsed["emotion"], robot, stop_event)  # ارسال الكلام الى الفن لابس لتحويله الى صوت
-    else:
-        print("nothing to record")
-        robot.set_expression("neutral")
-
-    recognizer.stop_continuous_recognition()  # إذا كان مستمرًا
-    recognizer = None  # تحرير الموارد
+        # وإيقاف التعرف الصوتي نهائياً
+        recognizer.stop_continuous_recognition()
 
 
 # ========== التحكم بزر Space ==========
