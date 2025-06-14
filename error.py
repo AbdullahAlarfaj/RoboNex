@@ -208,24 +208,31 @@ def speakwithelevenlabs(answer, emotion, robot):
 # ========== تحويل الصوت الى نص وارسال الاوامر لشات جي بي تي بعد تلقي الرد ==========
 def recognize_from_microphone(robot):
     global isRecordActive
-    speech_config = speechsdk.SpeechConfig(subscription=speech_key, region=service_region)
-    speech_config.speech_recognition_language = "ar-SA"
-    audio_config = speechsdk.audio.AudioConfig(use_default_microphone=True)
-    recognizer = speechsdk.SpeechRecognizer(speech_config=speech_config, audio_config=audio_config)
 
-    print("lessining now...")
-    robot.set_expression("listening")  # للتفكير بعد الاستماع مباشرة
-    result = recognizer.recognize_once_async().get()
-    if result.reason == speechsdk.ResultReason.RecognizedSpeech:
-        robot.set_expression("thinking")  # للتفكير بعد الاستماع مباشرة
-        print("النص:", result.text)
-        response = chat_with_gpt(result.text) #ارسال السؤال لشات جي بي تي
-        parsed = emotion_split(response)    # ارسال رد جي بي تي الى تحليل المشاعر لفصل المشاعر والرد
-        print("المشاعر:", parsed["emotion"])
-        print("النص:", parsed["text"])
-        speakwithelevenlabs(parsed["text"], parsed["emotion"], robot) #ارسال الكلام الى الفن لابس لتحويله الى صوت
-        isRecordActive = False
-    else:
+    try:
+
+        speech_config = speechsdk.SpeechConfig(subscription=speech_key, region=service_region)
+        speech_config.speech_recognition_language = "ar-SA"
+        audio_config = speechsdk.audio.AudioConfig(use_default_microphone=True)
+        recognizer = speechsdk.SpeechRecognizer(speech_config=speech_config, audio_config=audio_config)
+
+        print("lessining now...")
+        robot.set_expression("listening")  # للتفكير بعد الاستماع مباشرة
+        result = recognizer.recognize_once_async().get()
+        if result.reason == speechsdk.ResultReason.RecognizedSpeech:
+            robot.set_expression("thinking")  # للتفكير بعد الاستماع مباشرة
+            print("النص:", result.text)
+            response = chat_with_gpt(result.text) #ارسال السؤال لشات جي بي تي
+            parsed = emotion_split(response)    # ارسال رد جي بي تي الى تحليل المشاعر لفصل المشاعر والرد
+            print("المشاعر:", parsed["emotion"])
+            print("النص:", parsed["text"])
+            speakwithelevenlabs(parsed["text"], parsed["emotion"], robot) #ارسال الكلام الى الفن لابس لتحويله الى صوت
+            isRecordActive = False
+        else:
+            robot.set_expression("neutral")
+            isRecordActive = False
+    except Exception as e:
+        print("error in azura record")
         robot.set_expression("neutral")
         isRecordActive = False
 
