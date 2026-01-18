@@ -1,81 +1,134 @@
-import tkinter as tk
-from PIL import Image, ImageTk
-from pathlib import Path
-import threading
-from flask import Flask, request, jsonify
+"""
+🔴 تعليمات عامه (مهم جداً):
+أنت "روبوت مطعم اوكاي برجر"، كاشير ذكي يدير سلة مشتريات.
+كن لطيف جدا ومبدع في الردود والتعابير
+اذا طلب العميل منتج غير موجود في القائمة اعتذر منه وعطه اقتراح لمنتج بديل موجود في القائمة بدون ماتضيفه في السله
+مهم جدا اذا جيت تقترح للعميل اي منتج لاتضيفه في السله ابدا
+لاتعتمد اي  طلب الا اذا قال لك العميل اعتمد الطلب
+اذا كلمك العميل بالعربي رد عليه بالعربي اذا كلمك بالانجليزي رد عليه بالانجليزي
+دايما انصح العملاء بحلى البراونيز في حال ما اضافوه
+لاتقترح منتجات غير موجودة في القائمة  (مهم جداً)
+بعض الاوقات بيكون الطلب غير واضح مثل بجر اكي او بجر اوكاي مثلا يعني برجر اوكاي طبق نفس المثال على جميع الردود الممكنة و على جميع المنتجات  (مهم جداً)
+اذا طلب العميل حلى البارونيز او سويت البراوني او اي شي يوحي انه كيكة البراوني افهمها على اساس انها كيكة براوني وطبق هذا الكلام على كل المنتجات خلك مرن  (مهم جداً)
+اذا قال العميل كهمبجر او جرجر افهم انه يقصد برجر طبق هذا الشيء على كل شي يقوله العميل وحاول تفمه بصورة صحيحة (مهم جداً)
 
-# 1. تعريف تطبيق Flask خارج الكلاس
-app = Flask(__name__)
-face_instance = None  # متغير عالمي للوصول للكائن
+لديك القائمة التالية:
+{dynamic_menu}
 
-class RobotFace:
-    def __init__(self, master):
-        self.master = master
-        self.setup_window()
-        self.canvas = tk.Canvas(master, width=500, height=500, bg='black', highlightthickness=0)
-        self.canvas.pack()
+🔴 تعليمات إدارة السلة (مهم جداً):
+1. الإضافة: استخدم [ADD]item:qty[/ADD].
+2. الحذف: استخدم [REMOVE]item:qty[/REMOVE].
+3. اعتماد الطلب (الإنهاء): [CHECKOUT]TRUE[/CHECKOUT]
+4. مراجعة الطلب: [REVIEW]TRUE[/REVIEW]
 
-        self.expressions = {}
-        self.current_expression = None
-        self.load_expressions()
-        self.set_expression("neutral")
-        self.animate()
+🔴 التنسيق الإجباري للرد:
+[EM]happy/neutral/sad/listening/thinking[/EM]
+[ADD]item:qty[/ADD]
+[REMOVE]item:qty[/REMOVE]
+[CHECKOUT]TRUE[/CHECKOUT]
+[TEXT]ردك اللفظي هنا[/TEXT]
+"""
 
-    def setup_window(self):
-        self.master.title("Araba Mart Robot")
-        self.master.geometry("500x500")
-        self.master.configure(bg='black')
-        self.master.resizable(False, False)
+import azure.cognitiveservices.speech as speechsdk
+from openai import OpenAI
+import config
+from logger_config import logger
+from elevenlabs import play
+from elevenlabs.client import ElevenLabs
 
-    def load_expressions(self):
-        # ملاحظة: تأكد من وجود المجلد والصور فعلياً
-        base_path = Path("assets") # استبدلها بـ config.ASSETS_DIR
-        files = [("neutral", "neutral.gif"), ("happy", "happy.gif"), ("sad", "sad.gif")]
+from newcasher import speakwithelevenlabs
 
-        for name, filename in files:
-            path = base_path / filename
-            if path.exists():
-                gif = Image.open(path)
-                frames = [ImageTk.PhotoImage(gif.copy().resize((500, 500))) for i in range(getattr(gif, 'n_frames', 1)) if not gif.seek(i)]
-                self.expressions[name] = {"frames": frames, "total": len(frames), "idx": 0}
 
-    def set_expression(self, name):
-        name = name.lower()
-        if name in self.expressions:
-            self.expressions[name]["idx"] = 0
-            self.current_expression = self.expressions[name]
-            print(f"Changed to: {name}")
+# ============================= قسم الذكاء الاصطناعي ====================================
+class AIEngine:
+    def __init__(self):
+        self.openai_client = OpenAI(api_key=config.OPENAI_API_KEY)
+        self.speech_config = speechsdk.SpeechConfig(subscription=config.SPEECH_KEY, region=config.SERVICE_REGION)
+        self.speech_config.speech_synthesis_voice_name = config.VOICE_NAME
+        self.speech_config.speech_recognition_language = "ar-SA"
 
-    def animate(self):
-        if self.current_expression:
-            idx = self.current_expression["idx"]
-            frame = self.current_expression["frames"][idx]
-            self.canvas.delete("all")
-            self.canvas.create_image(250, 250, image=frame)
-            self.current_expression["idx"] = (idx + 1) % self.current_expression["total"]
-        self.master.after(100, self.animate)
+        self.last_user_msg = None
+        self.last_ai_msg = None
 
-# 2. تعريف الـ Route خارج الكلاس واستخدام المتغير العالمي
-@app.route('/call_func', methods=['POST'])
-def handle_call():
-    data = request.json
-    func_name = data.get("function")
-    if face_instance:
-        # استخدام master.after لضمان تنفيذ التغيير في خيط Tkinter الأساسي
-        face_instance.master.after(0, face_instance.set_expression, func_name)
-        return jsonify({"status": "success", "message": f"Face changed to {func_name}"})
-    return jsonify({"status": "error", "message": "Face not initialized"}), 500
+    # ============================= قسم تحويل الصوت الى نص ====================================
+    def listen(self):
+        try:
+            audio_config = speechsdk.audio.AudioConfig(use_default_microphone=True)
+            recognizer = speechsdk.SpeechRecognizer(speech_config=self.speech_config, audio_config=audio_config)
 
-def run_flask():
-    # تشغيل السيرفر في خيط منفصل
-    app.run(host='0.0.0.0', port=5000, debug=False, use_reloader=False)
+            logger.info("🎤 ...")
+            result = recognizer.recognize_once_async().get()
 
-if __name__ == '__main__':
-    root = tk.Tk()
-    face_instance = RobotFace(root)
+            if result.reason == speechsdk.ResultReason.RecognizedSpeech:
+                logger.info(f"👤 User: {result.text}")
+                return result.text
+            return None
+        except Exception as e:
+            logger.error(f"Mic Error: {e}")
+            return None
 
-    # 3. بدء خيط Flask
-    flask_thread = threading.Thread(target=run_flask, daemon=True)
-    flask_thread.start()
+    # ============================= قسم ارسال النص الى الذكاء الاصطناعي واخذ الرد منه ====================================
+    def think(self, user_text, menu_string, cart_string):
+        try:
+            system_prompt = config.BASE_SYSTEM_PROMPT.format(dynamic_menu=menu_string)
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "system", "content": f"محتوى السلة الحالي: {cart_string}"}
+            ]
 
-    root.mainloop()
+            if self.last_user_msg and self.last_ai_msg:
+                messages.append({"role": "user", "content": self.last_user_msg})
+                messages.append({"role": "assistant", "content": self.last_ai_msg})
+
+            messages.append({"role": "user", "content": user_text})
+
+            response = self.openai_client.chat.completions.create(
+                model=config.GPT_MODEL,
+                messages=messages,
+                temperature=0.7
+            )
+
+            reply = response.choices[0].message.content
+            self.last_user_msg = user_text
+            self.last_ai_msg = reply
+            return reply
+
+        except Exception as e:
+            logger.error(f"GPT Error: {e}")
+            return "[EM]sad[/EM][TEXT]عفواً، واجهت مشكلة في الاتصال.[/TEXT]"
+
+    # ============================= قسم تحويل نص الرد الى صوت ====================================
+    # =ازور=
+    def speak(self, answer):
+        client = ElevenLabs(api_key="sk_4acc948161a2146ac383121a981cb043b9857a398b941a76")
+        service_region = "qatarcentral"
+        try:
+            audio = client.generate(text=answer, voice="cgSgspJ2msm6clMCkdW9", model="eleven_flash_v2_5")
+
+            play(audio)
+            del audio  # تحرير الذاكرة حذف الصوت
+
+        except Exception as e:
+            print("⚠️ فشل تشغيل الصوت:", e)
+        #try:
+        #    speakwithelevenlabs(text)
+        #except Exception as e:
+        #    audio_config = speechsdk.audio.AudioOutputConfig(use_default_speaker=True)
+        #    synthesizer = speechsdk.SpeechSynthesizer(speech_config=self.speech_config, audio_config=audio_config)
+            # ملاحظة: دالة speak_text_async توقف الكود (Blocking) عند استخدام .get()
+        #    synthesizer.speak_text_async(text).get()
+        #    logger.error(f"TTS Error: {e}")
+
+    # =ايلافين لابس=
+    def speakwithelevenlabs(answer):
+        client = ElevenLabs(api_key=config.OPENAI_API_KEY)
+        service_region = "qatarcentral"
+        try:
+            audio = client.generate(text=answer, voice="Alice", model="eleven_multilingual_v2")
+
+
+            play(audio)
+            del audio  # تحرير الذاكرة حذف الصوت
+
+        except Exception as e:
+            print("⚠️ فشل تشغيل الصوت:", e)
