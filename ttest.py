@@ -1,250 +1,304 @@
-import sys
-import threading
-import time
-import random
-import pygame
-
-# مكتبات PyQt5
-from PyQt5.QtWidgets import QApplication
-from PyQt5.QtCore import Qt
-
-
-# ============================= استيراد الملفات ====================================
+from supabase import create_client
 import config
 from logger_config import logger
-from arduino_controller import ArduinoController
-from database_manager import DatabaseManager
-from ai_engine import AIEngine
-from utils import parse_ai_response
 
-# استيراد الواجهات
-from robot_face import RobotFace
-import cart_ui  # نستورد الملف كـ موديول
+# ============================= قسم ادارة السلة والمينيو ====================================
 
-# ============================= التهيئة العامة ====================================
-pygame.mixer.init()
+class DatabaseManager:
+    def __init__(self):
+        self.supabase = create_client(config.SUPABASE_URL, config.SUPABASE_KEY)
+        self.menu_db = {}
+        self.menu_string = ""
+        self.shopping_cart = {}
 
-# ============================= تهيئة الكلاسات ====================================
-arduino = ArduinoController(port=config.SERIAL_PORT, baudrate=config.BAUDRATE)
-db_manager = DatabaseManager()
-ai_brain = AIEngine()
+        # عند التشغيل: جلب المنيو والتأكد من وجود فاتورة مفتوحة
+        self.fetch_menu()
+        self.ensure_open_invoice()
+        self.fetch_remote_cart()
 
-# متغيرات عالمية للتحكم
-face = None
-is_recording = False
+    def fetch_menu(self):
+        try:
+            response = self.supabase.table("MENU_DB").select("*").execute()
+            new_menu = {}
+            if response.data:
+                for item in response.data:
+                    new_menu[str(item['id'])] = {
+                        "name": item['name'],
+                        "price": float(item['price']) if item['price'] else 0.0,
+                        "stock": item['stock'],
+                        "barcode": str(item['barcode']),
+                        "type": item['type'],
+                        "image": item.get('image_url')
+                    }
+            self.menu_db = new_menu
+            self.menu_string = "\n".join(
+                [f"- {key}: {val['name']} ({val['price']} ريال)"
+                 for key, val in self.menu_db.items() if val['stock']]
+            )
+        except Exception as e:
+            logger.error(f"⚠️ Menu Sync Error: {e}")
 
-
-# ============================= العمليات الخلفية (Threads) ====================================
-def menu_sync_loop():
-    while True:
-        db_manager.fetch_menu()
-        time.sleep(60)
-
-
-def cart_monitor_loop():
-    while True:
-        db_manager.fetch_remote_cart()
-        time.sleep(2)
-
-
-def random_behavior_loop():
-    while True:
-        if not is_recording and face:
-            time.sleep(random.uniform(10, 20))
-            if not is_recording:
-                rand_choice = random.randint(1, 3)
-                expr = "neutral"
-                if rand_choice == 1:
-                    expr = "neutral2"
-                elif rand_choice == 2:
-                    expr = "neutral1"
-                elif rand_choice == 3:
-                    expr = "sleep"
-
-                if face: face.set_expression(expr)
-
-
-# ============================= إدارة المحادثة المستمرة ====================================
-def run_continuous_conversation():
-    global is_recording
-
-    # إعدادات الجلسة
-    last_interaction_time = time.time()
-    TIMEOUT_SECONDS = 5
-    pending_barge_in_text = None
-
-    logger.info("🟢 Starting Continuous Conversation Mode...")
-
-    try:
-        # ✅ التعديل 1: الحلقة تعتمد على متغير التسجيل لتتوقف فوراً عند ضغط زر Stop
-        while is_recording:
-
-            # التحقق من المهلة الزمنية
-            current_time = time.time()
-            if current_time - last_interaction_time > TIMEOUT_SECONDS:
-                logger.info("⏳ Timeout reached. Ending conversation.")
-                break
-
-            # ====================================================
-            # مرحلة الاستماع
-            # ====================================================
-            if pending_barge_in_text:
-                user_text = pending_barge_in_text
-                pending_barge_in_text = None
-                logger.info(f"⏩ Skipping Mic (Using Barge-in text): {user_text}")
+    def ensure_open_invoice(self):
+        """التأكد عند التشغيل أن هناك فاتورة مفتوحة لاستقبال الطلبات"""
+        try:
+            # نجلب آخر فاتورة
+            res = self.supabase.table("invoice").select("*").order("id", desc=True).limit(1).execute()
+            if res.data:
+                last_inv = res.data[0]
+                # إذا كانت آخر فاتورة مدفوعة (مغلقة)، نفتح واحدة جديدة
+                if last_inv.get('paid') is True:
+                    self.supabase.table("invoice").insert({"total_invoice": 0.0, "paid": False}).execute()
+                    logger.info("🆕 تم إنشاء فاتورة افتتاحية جديدة")
             else:
-                if face: face.set_expression("listening")
-                arduino.send_command("listening")
+                # لا توجد فواتير أبداً، ننشئ الأولى
+                self.supabase.table("invoice").insert({"total_invoice": 0.0, "paid": False}).execute()
+        except:
+            pass
 
-                # الاستماع
-                user_text = ai_brain.listen(robot_last_text=ai_brain.last_ai_msg)
+    # ==============================================================================
+    # 🌟 الدالة الجديدة: تحديث إجمالي الفاتورة المفتوحة لحظياً
+    # ==============================================================================
+    def update_live_invoice_total(self, invoice_id=None):
+        """تحسب إجمالي السلة مع مراعاة نسبة الخصم المسجلة في الفاتورة"""
+        try:
+            # 1. تحديد رقم الفاتورة
+            if invoice_id is None:
+                res = self.supabase.table("invoice").select("id").order("id", desc=True).limit(1).execute()
+                if res.data:
+                    invoice_id = res.data[0]['id']
+                else:
+                    return
 
-            # 🛑 نقطة تفتيش: هل ضغط المستخدم إيقاف أثناء الاستماع؟
-            if not is_recording: break
+            # 2. حساب المجموع الفرعي (Subtotal) من السلة
+            response_cart = self.supabase.table('cart').select('total_price').eq('invoice_num', invoice_id).execute()
+            subtotal = 0.0
+            if response_cart.data:
+                subtotal = sum([float(item['total_price']) for item in response_cart.data])
 
-            # ====================================================
-            # مرحلة المعالجة
-            # ====================================================
-            if user_text:
-                last_interaction_time = time.time()
-                ai_brain.stop_speaking()
+            # 3. جلب نسبة الخصم الحالية من الفاتورة (للحفاظ عليها)
+            response_inv = self.supabase.table('invoice').select('discount_percentage').eq('id', invoice_id).execute()
+            discount_percent = 0.0
+            if response_inv.data and response_inv.data[0].get('discount_percentage'):
+                discount_percent = float(response_inv.data[0]['discount_percentage'])
 
-                if face: face.set_expression("thinking")
+            # 4. إعادة حساب القيم بناءً على المجموع الجديد
+            discount_amount = subtotal * (discount_percent / 100)
+            grand_total = max(0, subtotal - discount_amount)
 
-                ai_raw_response = ai_brain.think(
-                    user_text,
-                    db_manager.menu_string,
-                    db_manager.get_cart_summary()
-                )
+            # 5. تحديث كافة التفاصيل في الفاتورة
+            self.supabase.table("invoice").update({
+                "subtotal": subtotal,  # المبلغ قبل الخصم
+                "discount_amount": discount_amount,  # قيمة الخصم الجديدة
+                "total_invoice": grand_total  # الإجمالي النهائي الصافي
+            }).eq("id", invoice_id).execute()
 
-                # 🛑 نقطة تفتيش ثانية
-                if not is_recording: break
+            # logger.debug(f"💰 Invoice #{invoice_id} Synced: Sub={subtotal}, Disc={discount_percent}%, Total={grand_total}")
 
-                parsed = parse_ai_response(ai_raw_response)
+        except Exception as e:
+            logger.error(f"⚠️ Failed to update live invoice total: {e}")
 
-                # تنفيذ أوامر السلة
-                if parsed.get("add"):
-                    items = parsed["add"].split(',')
-                    for item in items:
-                        if ":" in item:
-                            pid, qty = item.split(":")
-                            # هنا نرسل is_absolute=True (تحديد دقيق)
-                            db_manager.sync_cart_item(pid.strip(), int(qty), is_absolute=True)
-                    cart_ui.refresh_cart_external()
+    def sync_cart_item(self, product_identifier, quantity_change, is_absolute=False):
+        """
+        is_absolute=False -> يضيف على الموجود (مثال: 3 + 1 = 4) [للأزرار وأوامر الإضافة]
+        is_absolute=True  -> يحدد الرقم بالضبط (مثال: 3 -> 5) [لأوامر التعديل]
+        """
+        try:
+            target_product = None
+            raw_key = str(product_identifier).strip()
 
-                if parsed["remove"]:
-                    items = parsed["remove"].split(',')
-                    for item in items:
-                        pid = item.split(":")[0].strip()
-                        if parsed["remove"].strip().lower() == "all":
-                            db_manager.clear_cart()
-                        else:
-                            db_manager.remove_cart_item(pid)
-                    cart_ui.refresh_cart_external()
+            # 1. البحث في القائمة المحلية
+            if hasattr(self, 'menu_db') and self.menu_db:
+                if raw_key in self.menu_db:
+                    target_product = self.menu_db[raw_key]
+                    target_product['id'] = raw_key
 
-                if parsed["checkout"]:
-                    if db_manager.archive_current_order():
-                        logger.info("💰 Checkout Completed")
-                    cart_ui.refresh_cart_external()
+                if not target_product:
+                    for pid, p_data in self.menu_db.items():
+                        p_name = str(p_data.get('name', '')).strip().lower()
+                        input_name = raw_key.lower()
+                        if input_name in p_name or input_name == str(p_data.get('barcode', '')):
+                            target_product = p_data
+                            target_product['id'] = pid
+                            break
 
-                # الرد الصوتي والحركي
-                emotion = parsed["emotion"]
-                if face: face.set_expression(emotion)
-                arduino.send_command("happy" if emotion == "neutral" else emotion)
+            if not target_product:
+                logger.warning(f"Product not found: {product_identifier}")
+                return False
 
-                if emotion == "neutral" and face:
-                    face.set_expression("speaking")
+            # 2. تحديد الفاتورة
+            inv_res = self.supabase.table('invoice').select("*").eq('paid', False).order("id", desc=True).limit(
+                1).execute()
+            invoice_id = inv_res.data[0]['id'] if inv_res.data else \
+            self.supabase.table('invoice').insert({'total_invoice': 0, 'paid': False}).execute().data[0]['id']
 
-                # النطق (فقط إذا ما زلنا نسجل)
-                if is_recording:
-                    is_interrupted, barge_in_text = ai_brain.speak(parsed["text"])
-                    last_interaction_time = time.time()
+            # 3. البحث عن المنتج في السلة
+            existing_item = None
+            check_id = self.supabase.table('cart').select("*").eq('invoice_num', invoice_id).eq('product_id',
+                                                                                                target_product[
+                                                                                                    'id']).execute()
+            if check_id.data:
+                existing_item = check_id.data[0]
 
-                    if is_interrupted and barge_in_text:
-                        logger.info(f"🔂 Processing Interruption: {barge_in_text}")
-                        pending_barge_in_text = barge_in_text
+            if not existing_item:
+                check_name = self.supabase.table('cart').select("*").eq('invoice_num', invoice_id).eq('name',
+                                                                                                      target_product[
+                                                                                                          'name']).execute()
+                if check_name.data:
+                    existing_item = check_name.data[0]
+                    self.supabase.table('cart').update({'product_id': target_product['id']}).eq('id', existing_item[
+                        'id']).execute()
 
+            # 4. التنفيذ (المنطق المفصول)
+            if existing_item:
+                # ✅ هنا يكمن السحر: نفصل المنطق حسب الطلب
+                if is_absolute:
+                    new_qty = quantity_change  # تثبيت الرقم كما هو (أمر Set)
+                    logger.info(f"🔄 Setting Exact Quantity: {target_product['name']} -> {new_qty}")
+                else:
+                    new_qty = existing_item['quantity'] + quantity_change  # جمع تراكمي (أمر Add)
+                    logger.info(
+                        f"➕ Accumulating Quantity: {target_product['name']} ({existing_item['quantity']} + {quantity_change} = {new_qty})")
+
+                if new_qty <= 0:
+                    self.remove_cart_item(existing_item['id'])
+                else:
+                    new_total = new_qty * target_product['price']
+                    self.supabase.table('cart').update({
+                        'quantity': new_qty,
+                        'total_price': new_total,
+                        'product_id': target_product['id']
+                    }).eq('id', existing_item['id']).execute()
             else:
-                # صمت
-                if not pygame.mixer.music.get_busy():
-                    if face: face.set_expression("neutral")
-                    arduino.send_command("neutral")
+                # إضافة جديدة
+                if quantity_change > 0:
+                    self.supabase.table('cart').insert({
+                        'invoice_num': invoice_id,
+                        'product_id': target_product['id'],
+                        'name': target_product['name'],
+                        'price': target_product['price'],
+                        'quantity': quantity_change,
+                        'total_price': target_product['price'] * quantity_change
+                    }).execute()
 
-            time.sleep(0.05)
+            self.update_live_invoice_total(invoice_id)
+            return True
 
-    except Exception as e:
-        logger.error(f"Conversation Loop Error: {e}")
-    finally:
-        # تنظيف عند الخروج
-        if face: face.set_expression("neutral")
-        arduino.send_command("neutral")
-        is_recording = False  # ضمان إغلاق الفلاق
+        except Exception as e:
+            logger.error(f"❌ Sync Cart Logic Error: {e}")
+            return False
 
-        # إعادة أزرار السلة لوضعها الطبيعي
-        if cart_ui.current_cart_window:
-            from PyQt5.QtCore import QMetaObject, Qt
-            QMetaObject.invokeMethod(cart_ui.current_cart_window, "stop_ui_mode", Qt.QueuedConnection)
+    def remove_cart_item(self, item_id):
+        try:
+            self.supabase.table("cart").delete().eq("product_id", item_id).execute()
 
-        logger.info("🔴 Session Ended.")
+            # حذف من المحلي
+            if item_id in self.shopping_cart:
+                del self.shopping_cart[item_id]
 
+            logger.info(f"➖ Cart Item Removed: {item_id}")
 
-# ============================= دوال التحكم ====================================
-def trigger_recording():
-    global is_recording
-    if is_recording:
-        logger.info("⚠️ Session is already active.")
-        return
+            # 🔥 تحديث الفاتورة الحالية فوراً
+            self.update_live_invoice_total()
 
-    is_recording = True
-    if pygame.mixer.music.get_busy(): pygame.mixer.music.stop()
-    threading.Thread(target=run_continuous_conversation, daemon=True).start()
+        except Exception as e:
+            logger.error(f"⚠️ Cart Remove Error: {e}")
 
+    def fetch_remote_cart(self):
+        """مزامنة ومراجعة الأسعار من الفلتر فلو"""
+        try:
+            response = self.supabase.table("cart").select("*").execute()
+            new_cart = {}
 
-def stop_recording_manual():
-    global is_recording
-    if is_recording:
-        logger.info("🛑 Manual Stop Requested...")
-        is_recording = False  # هذا سيكسر حلقة while في الدالة بالأعلى
-        ai_brain.stop_speaking()
-    else:
-        logger.info("⚠️ Session is already inactive.")
+            if response.data:
+                for item in response.data:
+                    pid = str(item['product_id'])
+                    qty = int(item['quantity'])
 
+                    if pid in self.menu_db and qty > 0:
+                        unit_price = self.menu_db[pid]['price']
+                        correct_total = unit_price * qty
 
-def safe_exit():
-    try:
-        pygame.mixer.quit()
-    except:
-        pass
-    sys.exit(0)
+                        # تصحيح السعر في جدول السلة لو كان خطأ
+                        db_price = float(item['total_price']) if item['total_price'] else 0.0
+                        if abs(correct_total - db_price) > 0.01:
+                            self.supabase.table("cart").update({"total_price": correct_total}).eq("id",
+                                                                                                  item['id']).execute()
 
+                        new_cart[pid] = qty
 
-# ============================= التشغيل الرئيسي ====================================
-if __name__ == "__main__":
-    # 1. تشغيل العمليات الخلفية
-    threading.Thread(target=menu_sync_loop, daemon=True).start()
-    threading.Thread(target=cart_monitor_loop, daemon=True).start()
-    threading.Thread(target=random_behavior_loop, daemon=True).start()
+            self.shopping_cart = new_cart
 
-    # 2. إعداد تطبيق PyQt5
-    app = QApplication(sys.argv)
+            # 🔥 تحديث الفاتورة الحالية بناءً على المزامنة
+            self.update_live_invoice_total()
 
-    # 3. إنشاء نافذة الوجه
-    face_window = RobotFace(trigger_callback=trigger_recording)
-    face = face_window  # ربط المتغير العالمي
+        except Exception as e:
+            logger.error(f"⚠️ Remote Cart Fetch Error: {e}")
 
-    # 4. إنشاء نافذة السلة (✅ التعديل 2: تمرير db_manager)
-    # هذا السطر مهم جداً لكي تعمل قائمة المنتجات
-    cart_window = cart_ui.CartWindow(
-        db_manager=db_manager,
-        start_recording_callback=trigger_recording
-    )
+    def clear_cart(self):
+        try:
+            self.shopping_cart = {}
+            self.supabase.table("cart").delete().gt("id", 0).execute()
+            # نصفر الفاتورة الحالية أيضاً
+            self.update_live_invoice_total()
+            logger.info("🧹 Cart Cleared")
+        except Exception as e:
+            logger.error(f"Clear Cart Error: {e}")
 
-    # 5. ربط زر الإيقاف (الأحمر)
-    cart_window.btn_stop_conv.clicked.connect(stop_recording_manual)
+    def get_cart_summary(self):
+        return str(self.shopping_cart)
 
-    # 6. عرض النوافذ
-    face_window.show()
-    cart_window.show()
+    def archive_current_order(self):
+        """ترحيل الطلب وفتح فاتورة جديدة"""
+        try:
+            if not self.shopping_cart:
+                return False
 
-    print("🤖 System Started: Final PyQt5 Architecture")
-    sys.exit(app.exec_())
+            grand_total = 0.0
+            for pid, qty in self.shopping_cart.items():
+                if pid in self.menu_db:
+                    grand_total += self.menu_db[pid]['price'] * qty
+
+            # 1. إغلاق الفاتورة الحالية
+            # نجلب الفاتورة المفتوحة ونحدثها لتصبح مدفوعة وبالمبلغ النهائي
+            res = self.supabase.table("invoice").select("id").order("id", desc=True).limit(1).execute()
+            if not res.data: return False
+
+            current_inv_id = res.data[0]['id']
+
+            self.supabase.table("invoice").update({
+                "total_invoice": grand_total,
+                "paid": True
+            }).eq("id", current_inv_id).execute()
+
+            logger.info(f"✅ تم اعتماد وإغلاق الفاتورة رقم: {current_inv_id}")
+
+            # 2. ترحيل المنتجات
+            items_to_archive = []
+            for pid, qty in self.shopping_cart.items():
+                if pid in self.menu_db:
+                    item_data = self.menu_db[pid]
+                    items_to_archive.append({
+                        "invoice_number": current_inv_id,
+                        "product_id": str(pid),
+                        "name": item_data['name'],
+                        "quantity": int(qty),
+                        "price": float(item_data['price']),
+                        "total_price": float(item_data['price'] * qty)
+                    })
+
+            if items_to_archive:
+                self.supabase.table("invoice_items").insert(items_to_archive).execute()
+
+            # 3. تنظيف السلة
+            self.clear_cart()
+
+            # 4. فتح فاتورة جديدة للمستقبل
+            response_next = self.supabase.table("invoice").insert({"total_invoice": 0.0, "paid": False}).execute()
+            if response_next.data:
+                logger.info(f"🆕 تم فتح فاتورة جديدة رقم {response_next.data[0]['id']}")
+
+            return True
+
+        except Exception as e:
+            logger.error(f"Archiving Error: {e}")
+            return False
