@@ -1,120 +1,387 @@
-import sys
-import os
-import cv2
-from PyQt5.QtWidgets import QDialog, QPushButton, QLabel, QGridLayout, QGraphicsOpacityEffect
-from PyQt5.QtCore import Qt, QTimer
-from PyQt5.QtGui import QImage, QPixmap, QFont
+from PyQt5.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout, QPushButton, QScrollArea,
+                             QWidget, QGridLayout, QLabel, QFrame, QSizePolicy, QScroller, QGraphicsOpacityEffect)
+from PyQt5.QtCore import Qt, QTimer, QPropertyAnimation, QEasingCurve, pyqtSignal, QObject, QRunnable, QThreadPool
+from PyQt5.QtGui import QFont, QCursor
+
+from local_image_loader import LocalImage
 
 
-class ScreensaverDialog(QDialog):
-    def __init__(self, video_path, parent=None):
+# ==========================================
+# 1. عامل الإضافة الخلفي (The Background Worker)
+# ==========================================
+class WorkerSignals(QObject):
+    finished = pyqtSignal()
+
+
+class CartAddWorker(QRunnable):
+    def __init__(self, db_manager, product_id):
+        super().__init__()
+        self.db_manager = db_manager
+        self.product_id = product_id
+        self.signals = WorkerSignals()
+
+
+    def run(self):
+        try:
+            self.db_manager.sync_cart_item(self.product_id, 1, is_absolute=False)
+        except Exception as e:
+            print(f"Error in background worker: {e}")
+        finally:
+            self.signals.finished.emit()
+
+
+# ==========================================
+# 2. نافذة تكبير الصورة (Zoom Popup) - جديد 🔍
+# ==========================================
+class ZoomImageDialog(QDialog):
+    def __init__(self, image_url, parent=None):
         super().__init__(parent)
-        self.setWindowFlags(Qt.Window | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
-        self.showFullScreen()
-        self.setStyleSheet("background-color: black;")
+        self.setWindowFlags(Qt.Dialog | Qt.FramelessWindowHint)
+        self.setAttribute(Qt.WA_TranslucentBackground)  # خلفية شفافة
+        self.setFixedSize(800, 800)  # حجم النافذة
 
-        # --- إعداد OpenCV لتشغيل الفيديو ---
-        self.video_path = video_path
-        self.cap = cv2.VideoCapture(self.video_path)
-
-        if not self.cap.isOpened():
-            print("❌ Error: Could not open video")
-            self.accept()
-            return
-
-        # 1. طبقة الفيديو (الخلفية)
-        self.video_label = QLabel(self)
-        self.video_label.setAlignment(Qt.AlignCenter)
-        self.video_label.setStyleSheet("background-color: black;")
-        # نجعل الفيديو يتمدد ليملأ المكان
-        self.video_label.setScaledContents(False)
-
-        # 2. طبقة الزر (الأمامية)
-        self.start_btn = QPushButton("Start Order \n ابدأ الطلب 👆")
-        self.start_btn.setFixedSize(350, 120)  # حجم واضح وكبير
-        self.start_btn.setCursor(Qt.PointingHandCursor)
-
-        # تنسيق الزر (شفافية مع خط واضح)
-        self.start_btn.setStyleSheet("""
-            QPushButton {
-                background-color: rgba(0, 0, 0, 160); /* خلفية سوداء شفافة */
-                color: white; 
-                border: 4px solid rgba(255, 255, 255, 200); /* إطار أبيض */
-                border-radius: 60px; 
-                font-size: 28px; 
-                font-weight: bold;
-                font-family: 'Segoe UI', sans-serif;
-            }
-            QPushButton:hover {
-                background-color: rgba(255, 87, 34, 220); /* برتقالي عند المرور */
-                border-color: white;
-            }
-        """)
-        self.start_btn.clicked.connect(self.close_screensaver)
-
-        # 3. نظام التخطيط الشبكي (Stacking System)
-        # هذا هو السر: نضع العنصرين في نفس الخلية (0,0)
-        layout = QGridLayout(self)
+        # Layout
+        layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
 
-        # أولاً نضيف الفيديو (ليكون في الخلف)
-        layout.addWidget(self.video_label, 0, 0)
+        # الإطار الرئيسي
+        frame = QFrame()
+        frame.setStyleSheet("""
+            QFrame {
+                background-color: white;
+                border-radius: 25px;
+                border: 2px solid #FF5722;
+            }
+        """)
+        frame_layout = QVBoxLayout(frame)
+        frame_layout.setContentsMargins(10, 10, 10, 10)
 
-        # ثانياً نضيف الزر (ليكون في الأمام) ونحدد مكانه في المنتصف
-        layout.addWidget(self.start_btn, 0, 0, Qt.AlignCenter)
+        # الصورة الكبيرة (نستخدم LocalImage للاستفادة من الكاش)
+        self.img_view = LocalImage("", size=600, full_fill=True)
+        self.img_view.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.img_view.load_url(image_url)
+        # تعديل ستايل الصورة داخل الزووم لتكون الحواف دائرية بالكامل
+        self.img_view.setStyleSheet("""
+            QLabel { background-color: transparent; border-radius: 20px; }
+        """)
 
-        # --- مؤقت تشغيل الفيديو ---
-        self.timer = QTimer(self)
-        self.timer.timeout.connect(self.update_frame)
-        self.timer.start(33)  # 30 FPS
+        # زر إغلاق بسيط في الأسفل
+        close_btn = QPushButton("Close ✕")
+        close_btn.setCursor(Qt.PointingHandCursor)
+        close_btn.setFixedHeight(40)
+        close_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #f1f2f6; color: #2d3436;
+                border-radius: 20px; font-weight: bold; font-size: 16px; border: none;
+            }
+            QPushButton:hover { background-color: #FF5722; color: white; }
+        """)
+        close_btn.clicked.connect(self.accept)
 
-    def update_frame(self):
-        ret, frame = self.cap.read()
-        if not ret:
-            # إعادة تشغيل الفيديو (Loop)
-            self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-            return
+        frame_layout.addWidget(self.img_view)
+        frame_layout.addWidget(close_btn)
 
-        # تحويل الألوان
-        frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        h, w, ch = frame.shape
-        bytes_per_line = ch * w
-        qt_img = QImage(frame.data, w, h, bytes_per_line, QImage.Format_RGB888)
-        pixmap = QPixmap.fromImage(qt_img)
+        layout.addWidget(frame)
 
-        # تكبير الصورة لتناسب حجم الليبل الحالي (وليس الشاشة فقط)
-        # KeepAspectRatio: يحافظ على الفيديو كاملاً (قد تظهر حواف سوداء اذا النسب مختلفة)
-        # KeepAspectRatioByExpanding: يملأ الشاشة (قد يقص جزء من الفيديو)
-        # جرب KeepAspectRatio أولاً لتضمن ظهور الزر والفيديو كاملاً
-        scaled_pixmap = pixmap.scaled(self.video_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
-
-        self.video_label.setPixmap(scaled_pixmap)
-
-    def close_screensaver(self):
-        self.timer.stop()
-        if self.cap.isOpened():
-            self.cap.release()
+    # إغلاق النافذة عند الضغط في أي مكان عليها
+    def mousePressEvent(self, event):
         self.accept()
 
-    def mousePressEvent(self, event):
-        # إغلاق عند لمس أي مكان في الشاشة
-        self.close_screensaver()
 
-    def show_screensaver(self):
-        # 1. إيقاف العداد
-        self.screensaver_timer.stop()
+# ==========================================
+# 3. كلاس القائمة الرئيسي
+# ==========================================
+class ProductSelectionDialog(QDialog):
+    product_added_signal = pyqtSignal()
 
-        # 2. ✅✅ إغلاق المنيو إذا كان مفتوحاً (هذا يحل مشكلة التعليق) ✅✅
-        if self.active_menu_dialog:
-            try:
-                self.active_menu_dialog.reject()  # إغلاق المنيو برمجياً
-                self.active_menu_dialog = None
-            except Exception as e:
-                print(f"Error closing menu: {e}")
+    def __init__(self, db_manager, parent=None):
+        super().__init__(parent)
+        self.db_manager = db_manager
+        self.current_category = "All"
+        self.category_buttons = {}
 
-        # 3. فتح شاشة التوقف
-        screensaver = ScreensaverDialog(self.promo_video_path, self)
-        screensaver.exec_()
+        self.thread_pool = QThreadPool.globalInstance()
 
-        # 4. إعادة تشغيل العداد بعد العودة
-        self.reset_idle_timer()
+        self.setWindowTitle("Menu")
+        self.setFixedSize(900, 1200)
+        self.setWindowFlags(Qt.Dialog | Qt.FramelessWindowHint)
+        self.setStyleSheet("""
+            QDialog {
+                background-color: #f5f6fa;
+                border-radius: 20px;
+                border: 1px solid #dcdde1;
+            }
+            QScrollArea { border: none; background-color: transparent; }
+            QLabel { font-family: 'Segoe UI', Arial, sans-serif; color: #2d3436; }
+             QPushButton#CloseBtn {
+                background-color: transparent; color: #636e72;
+                border: none; font-size: 20px; font-weight: bold;
+            }
+            QPushButton#CloseBtn:hover { color: #e74c3c; }
+        """)
+
+        try:
+            self.init_ui()
+            self.setup_notification()
+        except Exception as e:
+            print(f"❌ Popup Init Error: {e}")
+            self.reject()
+
+    def init_ui(self):
+        main_layout = QVBoxLayout(self)
+        main_layout.setContentsMargins(20, 20, 20, 20)
+        main_layout.setSpacing(15)
+
+        # الرأس
+        header_layout = QHBoxLayout()
+        title_lbl = QLabel("Our Menu")
+        title_lbl.setStyleSheet("font-size: 26px; font-weight: 800; color: #2d3436;")
+
+        close_btn = QPushButton("✕")
+        close_btn.setObjectName("CloseBtn")
+        close_btn.setCursor(QCursor(Qt.PointingHandCursor))
+        close_btn.clicked.connect(self.reject)
+
+        header_layout.addWidget(title_lbl)
+        header_layout.addStretch()
+        header_layout.addWidget(close_btn)
+        main_layout.addLayout(header_layout)
+
+        # التصنيفات
+        self.category_container_layout = QHBoxLayout()
+        self.setup_category_header()
+
+        cat_scroll = QScrollArea()
+        cat_scroll.setFixedHeight(70)
+        cat_scroll.setWidgetResizable(True)
+        cat_scroll.setStyleSheet("background: transparent;")
+
+        cat_widget = QWidget()
+        cat_widget.setLayout(self.category_container_layout)
+        cat_scroll.setWidget(cat_widget)
+
+        main_layout.addWidget(cat_scroll)
+        QScroller.grabGesture(cat_scroll.viewport(), QScroller.LeftMouseButtonGesture)
+
+        # المنتجات
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+
+        content_widget = QWidget()
+        content_widget.setStyleSheet("background-color: transparent;")
+        self.grid_layout = QGridLayout(content_widget)
+        self.grid_layout.setSpacing(20)
+        self.grid_layout.setContentsMargins(10, 10, 10, 10)
+
+        self.populate_products()
+
+        scroll_area.setWidget(content_widget)
+        main_layout.addWidget(scroll_area)
+        QScroller.grabGesture(scroll_area.viewport(), QScroller.LeftMouseButtonGesture)
+
+    def setup_notification(self):
+        self.notification_lbl = QLabel("✅ Product Added to Cart", self)
+        self.notification_lbl.setAlignment(Qt.AlignCenter)
+        self.notification_lbl.setFixedSize(300, 50)
+        self.notification_lbl.setStyleSheet("""
+            background-color: #2ecc71; 
+            color: white; 
+            font-size: 16px; 
+            font-weight: bold; 
+            border-radius: 25px;
+            padding: 10px;
+        """)
+        self.notification_lbl.move((self.width() - 300) // 2, 80)
+        self.notification_lbl.hide()
+
+        self.opacity_effect = QGraphicsOpacityEffect(self.notification_lbl)
+        self.notification_lbl.setGraphicsEffect(self.opacity_effect)
+
+        self.hide_timer = QTimer(self)
+        self.hide_timer.setSingleShot(True)
+        self.hide_timer.timeout.connect(self.hide_notification_animated)
+
+    def show_notification(self, message="Product Added"):
+        self.notification_lbl.setText(f"✅ {message}")
+        self.notification_lbl.show()
+        self.notification_lbl.raise_()
+
+        self.anim = QPropertyAnimation(self.opacity_effect, b"opacity")
+        self.anim.setDuration(200)
+        self.anim.setStartValue(0)
+        self.anim.setEndValue(1)
+        self.anim.setEasingCurve(QEasingCurve.OutCubic)
+        self.anim.start()
+
+        self.hide_timer.start(1200)
+
+    def hide_notification_animated(self):
+        self.anim_hide = QPropertyAnimation(self.opacity_effect, b"opacity")
+        self.anim_hide.setDuration(400)
+        self.anim_hide.setStartValue(1)
+        self.anim_hide.setEndValue(0)
+        self.anim_hide.finished.connect(self.notification_lbl.hide)
+        self.anim_hide.start()
+
+    def setup_category_header(self):
+        products_dict = getattr(self.db_manager, 'menu_db', {})
+        if not products_dict:
+            self.db_manager.fetch_menu()
+            products_dict = getattr(self.db_manager, 'menu_db', {})
+
+        unique_types = set()
+        if products_dict:
+            for p in products_dict.values():
+                p_type = p.get('type')
+                if p_type:
+                    unique_types.add(str(p_type).capitalize())
+
+        categories = ["All"] + sorted(list(unique_types))
+        self.category_container_layout.setSpacing(10)
+        self.category_container_layout.setContentsMargins(0, 0, 0, 0)
+
+        for cat_name in categories:
+            btn = QPushButton(cat_name)
+            btn.setFixedSize(120, 45)
+            btn.setCursor(Qt.PointingHandCursor)
+            btn.clicked.connect(lambda checked, c=cat_name: self.filter_category(c))
+            self.category_container_layout.addWidget(btn)
+            self.category_buttons[cat_name] = btn
+
+        self.category_container_layout.addStretch()
+        self.update_category_styles()
+
+    def filter_category(self, category_name):
+        self.current_category = category_name
+        self.update_category_styles()
+        self.populate_products()
+
+    def update_category_styles(self):
+        for name, btn in self.category_buttons.items():
+            if name == self.current_category:
+                btn.setStyleSheet("""
+                    QPushButton {
+                        background-color: #FF5722; color: white; border-radius: 22px;
+                        font-weight: bold; border: none; font-size: 15px;
+                    }
+                """)
+            else:
+                btn.setStyleSheet("""
+                    QPushButton {
+                        background-color: white; color: #2d3436; border-radius: 22px;
+                        font-weight: bold; border: 1px solid #dfe6e9;
+                    }
+                    QPushButton:hover { background-color: #ffe0b2; border-color: #FF5722; }
+                """)
+
+    def populate_products(self):
+        while self.grid_layout.count():
+            item = self.grid_layout.takeAt(0)
+            widget = item.widget()
+            if widget: widget.deleteLater()
+
+        products_dict = getattr(self.db_manager, 'menu_db', {})
+        if not products_dict:
+            lbl = QLabel("القائمة فارغة")
+            lbl.setAlignment(Qt.AlignCenter)
+            self.grid_layout.addWidget(lbl, 0, 0)
+            return
+
+        row = 0
+        col = 0
+        max_cols = 3
+
+        for pid, p_data in products_dict.items():
+            if not p_data.get('stock', True): continue
+            p_type = str(p_data.get('type', '')).capitalize()
+            if self.current_category != "All":
+                if self.current_category not in p_type and p_type not in self.current_category:
+                    continue
+
+            p_name = p_data.get('name', 'Unknown')
+            p_price = p_data.get('price', 0)
+            img_url = p_data.get('image')
+
+            card = QFrame()
+            card.setFixedSize(220, 280)
+            card.setStyleSheet("""
+                QFrame {
+                    background-color: white;
+                    border-radius: 20px;
+                    border: 1px solid #dfe6e9;
+                }
+                QFrame:hover { border: 1px solid #FF5722; }
+            """)
+
+            card_layout = QVBoxLayout(card)
+            card_layout.setContentsMargins(0, 0, 0, 15)
+            card_layout.setSpacing(10)
+
+            # ✅ 1. الصورة (قابلة للنقر الآن)
+            img_placeholder = LocalImage(p_name[:2].upper(), full_fill=True)
+            img_placeholder.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+            img_placeholder.load_url(img_url)
+
+            # 🔥 جعل المؤشر يد للتنبيه أن الصورة قابلة للنقر
+            img_placeholder.setCursor(Qt.PointingHandCursor)
+
+            # 🔥 ربط حدث النقر بدالة التكبير (Monkey Patching)
+            # نستخدم lambda لربط الحدث بدالة العرض
+            img_placeholder.mousePressEvent = lambda event, u=img_url: self.open_zoomed_image(u)
+
+            info_layout = QVBoxLayout()
+            info_layout.setContentsMargins(15, 0, 15, 0)
+            info_layout.setSpacing(5)
+
+            name_lbl = QLabel(p_name)
+            name_lbl.setStyleSheet("font-weight: 700; font-size: 15px; color: #2d3436; border: none;")
+            name_lbl.setAlignment(Qt.AlignCenter)
+            name_lbl.setWordWrap(True)
+
+            price_lbl = QLabel(f"{p_price} ريال")
+            price_lbl.setStyleSheet("color: #FF5722; font-size: 16px; font-weight: 800; border: none;")
+            price_lbl.setAlignment(Qt.AlignCenter)
+
+            add_btn = QPushButton("+ Add")
+            add_btn.setCursor(Qt.PointingHandCursor)
+            add_btn.setFixedSize(100, 38)
+            add_btn.setStyleSheet("""
+                QPushButton {
+                    background-color: #FF5722; color: white;
+                    border-radius: 19px; font-weight: bold; border: none;
+                }
+                QPushButton:hover { background-color: #E64A19; }
+                QPushButton:pressed { background-color: #BF360C; }
+            """)
+            add_btn.clicked.connect(lambda checked, i=pid, n=p_name: self.add_product_to_cart(i, n))
+
+            info_layout.addWidget(name_lbl)
+            info_layout.addWidget(price_lbl)
+            info_layout.addWidget(add_btn, alignment=Qt.AlignCenter)
+
+            card_layout.addWidget(img_placeholder)
+            card_layout.addLayout(info_layout)
+
+            self.grid_layout.addWidget(card, row, col)
+
+            col += 1
+            if col >= max_cols:
+                col = 0
+                row += 1
+
+    # ==========================================
+    # ✅ فتح نافذة التكبير
+    # ==========================================
+    def open_zoomed_image(self, img_url):
+        if img_url:
+            zoom_dialog = ZoomImageDialog(img_url, self)
+            zoom_dialog.exec_()
+
+    def add_product_to_cart(self, product_id, product_name):
+        self.show_notification(f"Added: {product_name}")
+        worker = CartAddWorker(self.db_manager, product_id)
+        worker.signals.finished.connect(self.on_bg_task_finished)
+        self.thread_pool.start(worker)
+
+    def on_bg_task_finished(self):
+        self.product_added_signal.emit()
